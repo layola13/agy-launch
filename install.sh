@@ -49,6 +49,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+WRAPPER="$BIN_DIR/agy-launch"
+USER_ENV="$CONFIG_DIR/.env"
+
 if [[ ! -f "$ROOT/main.py" ]]; then
   echo "error: main.py not found in $ROOT" >&2
   exit 1
