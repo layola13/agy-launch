@@ -372,10 +372,6 @@ def gemini_to_openai_messages(req: dict[str, Any]) -> list[dict[str, Any]]:
                     }
                 )
 
-        if tool_responses and role in ("user", "tool", "function"):
-            messages.extend(tool_responses)
-            continue
-
         openai_msg: dict[str, Any] = {"role": role, "content": content_text}
         if tool_calls:
             openai_msg["tool_calls"] = tool_calls
@@ -385,11 +381,26 @@ def gemini_to_openai_messages(req: dict[str, Any]) -> list[dict[str, Any]]:
         if openai_msg.get("content") or openai_msg.get("tool_calls"):
             messages.append(openai_msg)
 
+        if tool_responses:
+            messages.extend(tool_responses)
+
     return messages
+
+
+def gemini_allowed_tool_names(req: dict[str, Any]) -> set[str]:
+    cfg = req.get("toolConfig")
+    if not isinstance(cfg, dict):
+        return set()
+    fn_cfg = cfg.get("functionCallingConfig")
+    if not isinstance(fn_cfg, dict):
+        return set()
+    names = fn_cfg.get("allowedFunctionNames") or []
+    return {str(name) for name in names if str(name).strip()}
 
 
 def gemini_tools_to_openai(req: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    allowed_names = gemini_allowed_tool_names(req)
     for t in req.get("tools") or []:
         if not isinstance(t, dict):
             continue
@@ -398,6 +409,8 @@ def gemini_tools_to_openai(req: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             name = fd.get("name")
             if not name:
+                continue
+            if allowed_names and name not in allowed_names:
                 continue
             params = fd.get("parameters") or {"type": "object", "properties": {}}
             # OpenAI expects JSON Schema; Gemini sometimes uses uppercase types.
@@ -429,6 +442,29 @@ def _normalize_schema(node: Any) -> Any:
     return node
 
 
+def gemini_tool_choice_to_openai(req: dict[str, Any], tools: list[dict[str, Any]]) -> Any:
+    if not tools:
+        return None
+    cfg = req.get("toolConfig")
+    if not isinstance(cfg, dict):
+        return None
+    fn_cfg = cfg.get("functionCallingConfig")
+    if not isinstance(fn_cfg, dict):
+        return None
+
+    mode = str(fn_cfg.get("mode") or "").upper()
+    if mode == "NONE":
+        return "none"
+    if mode == "ANY":
+        allowed_names = gemini_allowed_tool_names(req)
+        if len(allowed_names) == 1:
+            return {"type": "function", "function": {"name": next(iter(allowed_names))}}
+        return "required"
+    if mode in ("AUTO", "VALIDATED"):
+        return "auto"
+    return None
+
+
 def build_openai_payload(raw: dict[str, Any]) -> dict[str, Any]:
     req = unwrap_generate_request(raw)
     messages = gemini_to_openai_messages(req)
@@ -445,6 +481,9 @@ def build_openai_payload(raw: dict[str, Any]) -> dict[str, Any]:
     tools = gemini_tools_to_openai(req)
     if tools:
         payload["tools"] = tools
+        tool_choice = gemini_tool_choice_to_openai(req, tools)
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
 
     gen = req.get("generationConfig") or {}
     if isinstance(gen, dict):
@@ -592,6 +631,12 @@ class TranslationProxy(BaseHTTPRequestHandler):
                     except Exception:
                         args = {"_raw": tc["args_str"]}
                     name = tc["name"] or "tool"
+                    function_call: dict[str, Any] = {
+                        "name": name,
+                        "args": args,
+                    }
+                    if tc["id"]:
+                        function_call["id"] = tc["id"]
                     self._send_chunk(
                         {
                             "response": {
@@ -601,10 +646,7 @@ class TranslationProxy(BaseHTTPRequestHandler):
                                             "role": "model",
                                             "parts": [
                                                 {
-                                                    "functionCall": {
-                                                        "name": name,
-                                                        "args": args,
-                                                    }
+                                                    "functionCall": function_call
                                                 }
                                             ],
                                         }
