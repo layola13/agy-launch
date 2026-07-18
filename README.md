@@ -4,6 +4,15 @@ Launcher for [agy](https://antigravity.google) (Antigravity CLI) that routes mod
 
 **No secrets or private endpoints are hard-coded.** Configure everything via `.env` or environment variables so this repo is safe to publish.
 
+## Copyright / 免责声明
+
+Copyright (c) 2026 agy-launch contributors
+
+**仅供学习与研究使用；其他用途后果自负。**
+
+This project is for learning and research only. Any other use is at your own risk.
+See [COPYRIGHT](COPYRIGHT).
+
 ## What it does
 
 1. Loads config from env / `.env` (required: base URL, model, API key).
@@ -85,9 +94,14 @@ agy rejects unknown `--model` values even if the proxy advertises them. Prefer k
 ./install.sh              # install wrapper + create user .env from example if missing
 ./install.sh --force-env  # overwrite user .env from .env.example
 ./install.sh --no-env     # only install binary
-./install.sh --link       # symlink to main.py instead of a wrapper script
+./install.sh --link       # symlink to the repo launcher instead of generating a wrapper script
 ./install.sh --bin-dir ~/bin --config-dir ~/.config/agy-launch
 ```
+
+If `agy-launch` fails with `python3: can't open file '/root/.local/bin/main.py'`,
+you have an old copied/symlinked launcher that resolved its own directory as
+`~/.local/bin`. Reinstall with `./install.sh` or use the fixed repo launcher,
+which resolves symlinks before locating `main.py`.
 
 ## Usage (same flags as agy)
 

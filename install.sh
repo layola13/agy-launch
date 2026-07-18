@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 agy-launch contributors
+# 仅供学习与研究使用；其他用途后果自负。
 # Install agy-launch into ~/.local/bin and set up a user .env (no secrets in repo).
 set -euo pipefail
 
@@ -62,14 +64,13 @@ mkdir -p "$BIN_DIR" "$CONFIG_DIR"
 # Keep package copy executable for --link / direct runs
 chmod +x "$ROOT/main.py"
 if [[ -f "$ROOT/agy-launch" ]]; then
-  # Prefer main.py as source of truth; refresh sibling executable without secrets
-  cp -f "$ROOT/main.py" "$ROOT/agy-launch"
+  # Keep the symlink-aware launcher executable for direct runs and --link.
   chmod +x "$ROOT/agy-launch"
 fi
 
 if [[ "$USE_LINK" -eq 1 ]]; then
-  ln -sfn "$ROOT/main.py" "$WRAPPER"
-  echo "linked $WRAPPER -> $ROOT/main.py"
+  ln -sfn "$ROOT/agy-launch" "$WRAPPER"
+  echo "linked $WRAPPER -> $ROOT/agy-launch"
 else
   # Wrapper so moves/updates of the repo still work if path changes only when reinstalling
   cat >"$WRAPPER" <<EOF

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 agy-launch contributors
+# 仅供学习与研究使用；其他用途后果自负。
+# For learning and research only; any other use is at your own risk.
 """agy-launch: local Gemini Code Assist shim that forwards to an OpenAI-compatible API.
 
 Starts a tiny local proxy, points agy at it via CLOUD_CODE_URL, translates:

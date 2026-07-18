@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 agy-launch contributors
+# 仅供学习与研究使用；其他用途后果自负。
 # Portable entrypoint — no secrets, no absolute machine paths.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec python3 "$ROOT/main.py" "$@"
