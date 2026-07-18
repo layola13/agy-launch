@@ -61,7 +61,10 @@ Shell `export` always wins over any `.env` file.
 
 | Variable | Meaning |
 |----------|---------|
-| `AGY_LAUNCH_CLI_MODEL` | Passed to `agy --model` (default `gemini-3.5-flash-low`; must be a known agy id) |
+| `AGY_LAUNCH_CLI_MODEL` | Passed to `agy --model` and promoted as the default advertised agy model id (default `gemini-3.5-flash-low`; must be a known agy id) |
+| `AGY_LAUNCH_MODEL_DISPLAY_NAME` | Optional display name shown for that agy model id; defaults to `AGY_LAUNCH_MODEL` |
+| `AGY_LAUNCH_MODEL_PROVIDER` | Optional provider metadata for the advertised model: `google`, `openai`, or `anthropic` |
+| `AGY_LAUNCH_USER_AGENT` | Optional upstream HTTP `User-Agent`; defaults to `curl/8.5.0` because some gateways block Python urllib’s default signature |
 | `AGY_BIN` | Path to `agy` (default `agy`) |
 | `AGY_LAUNCH_ENV` | Force a specific env file path |
 | `AGY_LAUNCH_VERBOSE=1` | Log proxy requests |
@@ -73,9 +76,9 @@ Shell `export` always wins over any `.env` file.
 1. `AGY_LAUNCH_ENV` if set  
 2. `./.env` or `./.agy-launch.env` (cwd)  
 3. Parent directories (up to 6 levels)  
-4. `~/.config/agy-launch/.env`  
-5. `~/.agy-launch.env`  
-6. Package directory `.env` (usually only for local dev)
+4. Package directory `.env` (repo-local / launcher-local)  
+5. `~/.config/agy-launch/.env`  
+6. `~/.agy-launch.env`
 
 Copy the template from [`.env.example`](.env.example).
 
@@ -87,6 +90,17 @@ Copy the template from [`.env.example`](.env.example).
 | CLI | `AGY_LAUNCH_CLI_MODEL` / `--model` | agy allowlist id (e.g. `gemini-3.5-flash-low`) |
 
 agy rejects unknown `--model` values even if the proxy advertises them. Prefer known ids from `agy models`; the proxy still sends `AGY_LAUNCH_MODEL` upstream.
+
+If your real upstream model is not Gemini, keep using a known agy CLI id in `AGY_LAUNCH_CLI_MODEL`, then map it to your gateway model with:
+
+```env
+AGY_LAUNCH_MODEL=your-real-upstream-model
+AGY_LAUNCH_CLI_MODEL=gemini-3.5-flash-low
+AGY_LAUNCH_MODEL_DISPLAY_NAME=your-real-upstream-model
+AGY_LAUNCH_MODEL_PROVIDER=openai
+```
+
+That keeps agy happy with a known allowlist id while the proxy sends your actual model upstream and advertises a less misleading label/provider in `fetchAvailableModels`.
 
 ## install.sh
 

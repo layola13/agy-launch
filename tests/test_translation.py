@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -12,6 +13,9 @@ import main  # noqa: E402
 class TranslationTests(unittest.TestCase):
     def setUp(self) -> None:
         main.TARGET_MODEL = "test-model"
+        main.AGY_CLI_MODEL = "gemini-3.5-flash-low"
+        main.MODEL_DISPLAY_NAME = "test-model"
+        main.MODEL_PROVIDER = ""
 
     def test_model_role_function_response_becomes_tool_message(self) -> None:
         req = {
@@ -110,6 +114,60 @@ class TranslationTests(unittest.TestCase):
             payload["tool_choice"],
             {"type": "function", "function": {"name": "read_file"}},
         )
+
+    def test_configure_models_resp_promotes_cli_model_and_display_name(self) -> None:
+        raw = {
+            "models": {
+                "gemini-3-flash": {
+                    "displayName": "Gemini 3 Flash",
+                    "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+                    "modelProvider": "MODEL_PROVIDER_GOOGLE",
+                }
+            },
+            "defaultAgentModelId": "gemini-3-flash",
+            "commandModelIds": ["gemini-3-flash"],
+        }
+        main.TARGET_MODEL = "gpt-4.1-mini"
+        main.AGY_CLI_MODEL = "gemini-3.5-flash-low"
+        main.MODEL_DISPLAY_NAME = "gpt-4.1-mini"
+        main.MODEL_PROVIDER = "openai"
+
+        configured = main._configure_models_resp(raw)
+
+        self.assertEqual(configured["defaultAgentModelId"], "gemini-3.5-flash-low")
+        self.assertEqual(configured["commandModelIds"][0], "gemini-3.5-flash-low")
+        self.assertIn("gemini-3.5-flash-low", configured["models"])
+        self.assertEqual(
+            configured["models"]["gemini-3.5-flash-low"]["displayName"],
+            "gpt-4.1-mini",
+        )
+        self.assertEqual(
+            configured["models"]["gemini-3.5-flash-low"]["modelProvider"],
+            "MODEL_PROVIDER_OPENAI",
+        )
+
+    def test_candidate_env_paths_prefers_repo_env_over_user_env(self) -> None:
+        old_here = main._HERE
+        old_env = os.environ.copy()
+        old_cwd = os.getcwd()
+        try:
+            with tempfile.TemporaryDirectory() as cwd, tempfile.TemporaryDirectory() as home:
+                repo_dir = os.path.join(home, "repo", "agy-launch")
+                os.makedirs(repo_dir, exist_ok=True)
+                main._HERE = repo_dir
+                os.chdir(cwd)
+                os.environ.clear()
+                os.environ["HOME"] = home
+                paths = main._candidate_env_paths()
+                self.assertLess(
+                    paths.index(os.path.join(repo_dir, ".env")),
+                    paths.index(os.path.join(home, ".config", "agy-launch", ".env")),
+                )
+        finally:
+            main._HERE = old_here
+            os.chdir(old_cwd)
+            os.environ.clear()
+            os.environ.update(old_env)
 
 
 if __name__ == "__main__":

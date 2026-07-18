@@ -14,6 +14,7 @@ See .env.example and README.md.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import os
 import socket
@@ -42,6 +43,9 @@ TARGET_API_KEY: str = ""
 AGY_CLI_MODEL: str = "gemini-3.5-flash-low"
 AGY_BIN: str = "agy"
 DEBUG_DIR: str = ""
+MODEL_DISPLAY_NAME: str = ""
+MODEL_PROVIDER: str = ""
+UPSTREAM_USER_AGENT: str = "curl/8.5.0"
 _LOADED_ENV_FILES: list[str] = []
 
 
@@ -94,13 +98,13 @@ def _candidate_env_paths() -> list[str]:
         paths.append(os.path.join(parent, ".agy-launch.env"))
         parent = os.path.dirname(parent)
 
-    # 3) User config (install script default)
+    # 3) Repo-local/package directory config
+    paths.append(os.path.join(_HERE, ".env"))
+
+    # 4) User config (install script default)
     xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
     paths.append(os.path.join(xdg, "agy-launch", ".env"))
     paths.append(os.path.expanduser("~/.agy-launch.env"))
-
-    # 4) Install / package directory
-    paths.append(os.path.join(_HERE, ".env"))
 
     # de-dupe preserving order
     seen: set[str] = set()
@@ -119,7 +123,7 @@ def load_dotenv_files(*, override_existing: bool = False) -> list[str]:
     By default does not override variables already present in the environment
     (so `export AGY_LAUNCH_MODEL=... agy-launch` still wins).
     When multiple files define the same key, the first file in priority order wins
-    (project cwd before user config before package dir).
+    (project cwd before repo/package config before user config).
     """
     loaded: list[str] = []
     claimed: set[str] = set()
@@ -147,7 +151,8 @@ def load_dotenv_files(*, override_existing: bool = False) -> list[str]:
 def load_config() -> None:
     """Populate module-level TARGET_* from env + .env. Exit if required missing."""
     global TARGET_BASE_URL, TARGET_MODEL, TARGET_API_KEY
-    global AGY_CLI_MODEL, AGY_BIN, DEBUG_DIR, _LOADED_ENV_FILES
+    global AGY_CLI_MODEL, AGY_BIN, DEBUG_DIR, MODEL_DISPLAY_NAME, MODEL_PROVIDER
+    global UPSTREAM_USER_AGENT, _LOADED_ENV_FILES
 
     _LOADED_ENV_FILES = load_dotenv_files()
 
@@ -177,6 +182,9 @@ def load_config() -> None:
     TARGET_API_KEY = os.environ["AGY_LAUNCH_API_KEY"].strip()
     AGY_CLI_MODEL = (os.environ.get("AGY_LAUNCH_CLI_MODEL") or "gemini-3.5-flash-low").strip()
     AGY_BIN = (os.environ.get("AGY_BIN") or "agy").strip()
+    MODEL_DISPLAY_NAME = (os.environ.get("AGY_LAUNCH_MODEL_DISPLAY_NAME") or TARGET_MODEL).strip()
+    MODEL_PROVIDER = (os.environ.get("AGY_LAUNCH_MODEL_PROVIDER") or "").strip().lower()
+    UPSTREAM_USER_AGENT = (os.environ.get("AGY_LAUNCH_USER_AGENT") or "curl/8.5.0").strip()
     DEBUG_DIR = (
         os.environ.get("AGY_LAUNCH_DEBUG_DIR")
         or os.path.join(tempfile.gettempdir(), "agy-launch")
@@ -257,7 +265,111 @@ def _bootstrap_fixtures() -> tuple[dict[str, Any], dict[str, Any]]:
             "experimentIds": [],
         },
     )
-    return load_resp, models_resp
+    return load_resp, _configure_models_resp(models_resp)
+
+
+def _provider_metadata_overrides() -> dict[str, str]:
+    mapping = {
+        "google": {
+            "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+            "modelProvider": "MODEL_PROVIDER_GOOGLE",
+        },
+        "openai": {
+            "apiProvider": "API_PROVIDER_OPENAI_VERTEX",
+            "modelProvider": "MODEL_PROVIDER_OPENAI",
+        },
+        "anthropic": {
+            "apiProvider": "API_PROVIDER_ANTHROPIC_VERTEX",
+            "modelProvider": "MODEL_PROVIDER_ANTHROPIC",
+        },
+    }
+    return mapping.get(MODEL_PROVIDER, {})
+
+
+def _merge_model_ids(values: Any, preferred: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for candidate in [preferred, *(values or [])]:
+        if not isinstance(candidate, str):
+            continue
+        candidate = candidate.strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        out.append(candidate)
+    return out
+
+
+def _configure_models_resp(raw: dict[str, Any]) -> dict[str, Any]:
+    models_resp = deepcopy(raw) if isinstance(raw, dict) else {}
+    models = models_resp.get("models")
+    if not isinstance(models, dict):
+        models = {}
+        models_resp["models"] = models
+
+    template: dict[str, Any] | None = None
+    if isinstance(models.get(AGY_CLI_MODEL), dict):
+        template = models[AGY_CLI_MODEL]
+    else:
+        default_id = models_resp.get("defaultAgentModelId")
+        if isinstance(default_id, str) and isinstance(models.get(default_id), dict):
+            template = models[default_id]
+        else:
+            for value in models.values():
+                if isinstance(value, dict):
+                    template = value
+                    break
+
+    if template is None:
+        template = {
+            "supportsImages": True,
+            "supportsThinking": True,
+            "thinkingBudget": 4000,
+            "recommended": True,
+            "maxTokens": 1048576,
+            "maxOutputTokens": 65536,
+            "tokenizerType": "LLAMA_WITH_SPECIAL",
+            "quotaInfo": {"remainingFraction": 1.0},
+            "model": "MODEL_PLACEHOLDER_M20",
+            "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+            "modelProvider": "MODEL_PROVIDER_GOOGLE",
+        }
+
+    entry = deepcopy(template)
+    entry["displayName"] = MODEL_DISPLAY_NAME or TARGET_MODEL or AGY_CLI_MODEL
+    entry["recommended"] = True
+    entry.update(_provider_metadata_overrides())
+    models[AGY_CLI_MODEL] = entry
+
+    models_resp["defaultAgentModelId"] = AGY_CLI_MODEL
+    for key in (
+        "commandModelIds",
+        "tabModelIds",
+        "imageGenerationModelIds",
+        "mqueryModelIds",
+        "webSearchModelIds",
+        "commitMessageModelIds",
+    ):
+        models_resp[key] = _merge_model_ids(models_resp.get(key), AGY_CLI_MODEL)
+
+    agent_model_sorts = models_resp.get("agentModelSorts")
+    if not isinstance(agent_model_sorts, list) or not agent_model_sorts:
+        agent_model_sorts = [{"displayName": "Recommended", "groups": [{"modelIds": []}]}]
+        models_resp["agentModelSorts"] = agent_model_sorts
+
+    first_sort = agent_model_sorts[0] if isinstance(agent_model_sorts[0], dict) else {}
+    if not isinstance(agent_model_sorts[0], dict):
+        agent_model_sorts[0] = first_sort
+    groups = first_sort.get("groups")
+    if not isinstance(groups, list) or not groups:
+        groups = [{"modelIds": []}]
+        first_sort["groups"] = groups
+    first_group = groups[0] if isinstance(groups[0], dict) else {}
+    if not isinstance(groups[0], dict):
+        groups[0] = first_group
+    first_group["modelIds"] = _merge_model_ids(first_group.get("modelIds"), AGY_CLI_MODEL)
+
+    return models_resp
 
 
 # Placeholders replaced in main() after load_config().
@@ -567,6 +679,7 @@ class TranslationProxy(BaseHTTPRequestHandler):
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {TARGET_API_KEY}",
                 "Accept": "text/event-stream" if stream else "application/json",
+                "User-Agent": UPSTREAM_USER_AGENT,
             },
             method="POST",
         )
