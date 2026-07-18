@@ -1,5 +1,6 @@
 # Local secrets — never commit
 .env
+.env.bak
 .agy-launch.env
 *.env.local
 .env.*
