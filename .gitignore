@@ -1,0 +1,52 @@
+# Local secrets — never commit
+.env
+.agy-launch.env
+*.env.local
+.env.*
+!.env.example
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.cache/
+.venv/
+venv/
+ENV/
+
+# Installer / local machine wrappers (absolute paths)
+# Prefer: python3 main.py  or  ./install.sh
+# If you keep a portable copy of main.py named agy-launch, force-add it.
+
+# Debug dumps from the proxy
+incoming_request.json
+outgoing_openai_request.json
+failed_request.json
+/tmp/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log

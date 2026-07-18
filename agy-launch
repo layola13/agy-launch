@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Portable entrypoint — no secrets, no absolute machine paths.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$ROOT/main.py" "$@"
