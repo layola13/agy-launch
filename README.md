@@ -27,6 +27,8 @@ See [COPYRIGHT](COPYRIGHT).
 # 1. Install (wrapper in ~/.local/bin + user config template)
 ./install.sh
 
+
+
 # 2. Edit user config (or create a project ./.env)
 $EDITOR ~/.config/agy-launch/.env
 
@@ -35,6 +37,7 @@ export PATH="$HOME/.local/bin:$PATH"
 agy-launch
 agy-launch --print "hello" --print-timeout 2m
 ```
+`./install.sh` also auto-installs the upstream CLI when it is missing (use `--skip-cli` to opt out).
 
 ### Project-local `.env` (recommended for per-repo settings)
 
