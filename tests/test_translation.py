@@ -169,6 +169,44 @@ class TranslationTests(unittest.TestCase):
             os.environ.clear()
             os.environ.update(old_env)
 
+    def test_reasoning_and_token_defaults(self) -> None:
+        main.REASONING_EFFORT = "low"
+        main.MAX_COMPLETION_TOKENS = 4000
+        main.MAX_TOKENS = 8000
+        try:
+            raw = {"contents": [{"role": "user", "parts": [{"text": "hello"}]}]}
+            payload = main.build_openai_payload(raw)
+            self.assertEqual(payload.get("reasoning_effort"), "low")
+            self.assertEqual(payload.get("max_completion_tokens"), 4000)
+            self.assertEqual(payload.get("max_tokens"), 8000)
+        finally:
+            main.REASONING_EFFORT = ""
+            main.MAX_COMPLETION_TOKENS = 0
+            main.MAX_TOKENS = 0
+
+    def test_key_rotation(self) -> None:
+        main.API_KEYS = ["key1", "key2", "key3"]
+        main.FROZEN_KEYS = {}
+
+        # 1. Initially first key is returned
+        self.assertEqual(main.get_active_key(), "key1")
+
+        # 2. Freeze key1 temporarily
+        main.mark_key_failed("key1", 429)
+        self.assertEqual(main.get_active_key(), "key2")
+
+        # 3. Freeze key2 permanently
+        main.mark_key_failed("key2", 401)
+        self.assertEqual(main.get_active_key(), "key3")
+
+        # 4. If all keys are frozen, the one that expires earliest (key1) is chosen
+        main.mark_key_failed("key3", 429)
+        self.assertEqual(main.get_active_key(), "key1")
+
+        # Clean up
+        main.API_KEYS = []
+        main.FROZEN_KEYS = {}
+
 
 if __name__ == "__main__":
     unittest.main()

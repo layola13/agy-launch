@@ -33,13 +33,18 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _REQUIRED_KEYS = (
     "AGY_LAUNCH_BASE_URL",
     "AGY_LAUNCH_MODEL",
-    "AGY_LAUNCH_API_KEY",
 )
 
 # Filled by load_config() before the proxy serves traffic.
 TARGET_BASE_URL: str = ""
 TARGET_MODEL: str = ""
 TARGET_API_KEY: str = ""
+API_KEYS: list[str] = []
+FROZEN_KEYS: dict[str, float] = {}
+FROZEN_LOCK = threading.Lock()
+REASONING_EFFORT: str = ""
+MAX_COMPLETION_TOKENS: int = 0
+MAX_TOKENS: int = 0
 AGY_CLI_MODEL: str = "gemini-3.5-flash-low"
 AGY_BIN: str = "agy"
 DEBUG_DIR: str = ""
@@ -47,6 +52,43 @@ MODEL_DISPLAY_NAME: str = ""
 MODEL_PROVIDER: str = ""
 UPSTREAM_USER_AGENT: str = "curl/8.5.0"
 _LOADED_ENV_FILES: list[str] = []
+
+import time
+
+def get_active_key() -> str:
+    with FROZEN_LOCK:
+        now = time.time()
+        for key in API_KEYS:
+            if FROZEN_KEYS.get(key, 0) <= now:
+                return key
+        
+        candidates = []
+        for key in API_KEYS:
+            expire = FROZEN_KEYS.get(key, 0)
+            if expire - now < 43200: # less than 12 hours
+                candidates.append((expire, key))
+                
+        if candidates:
+            candidates.sort()
+            expire, key = candidates[0]
+            FROZEN_KEYS[key] = 0
+            return key
+            
+        return API_KEYS[0]
+
+
+def mark_key_failed(key: str, status_code: int) -> None:
+    with FROZEN_LOCK:
+        now = time.time()
+        if status_code == 429:
+            FROZEN_KEYS[key] = now + 60
+            print(f"[agy-launch] key {key[:10]}... frozen temporarily (429 rate limit) for 60s", file=sys.stderr)
+        elif status_code in (401, 402):
+            FROZEN_KEYS[key] = now + 86400
+            print(f"[agy-launch] key {key[:10]}... frozen permanently (401/402 auth error)", file=sys.stderr)
+        elif status_code in (502, 503, 504):
+            FROZEN_KEYS[key] = now + 30
+            print(f"[agy-launch] key {key[:10]}... frozen temporarily ({status_code} server error) for 30s", file=sys.stderr)
 
 
 def _parse_dotenv(path: str) -> dict[str, str]:
@@ -150,13 +192,19 @@ def load_dotenv_files(*, override_existing: bool = False) -> list[str]:
 
 def load_config() -> None:
     """Populate module-level TARGET_* from env + .env. Exit if required missing."""
-    global TARGET_BASE_URL, TARGET_MODEL, TARGET_API_KEY
+    global TARGET_BASE_URL, TARGET_MODEL, TARGET_API_KEY, API_KEYS
     global AGY_CLI_MODEL, AGY_BIN, DEBUG_DIR, MODEL_DISPLAY_NAME, MODEL_PROVIDER
     global UPSTREAM_USER_AGENT, _LOADED_ENV_FILES
+    global REASONING_EFFORT, MAX_COMPLETION_TOKENS, MAX_TOKENS
 
     _LOADED_ENV_FILES = load_dotenv_files()
 
     missing = [k for k in _REQUIRED_KEYS if not (os.environ.get(k) or "").strip()]
+    keys_str = os.environ.get("AGY_LAUNCH_API_KEYS") or os.environ.get("AGY_LAUNCH_API_KEY") or ""
+    API_KEYS = [k.strip() for k in keys_str.split(",") if k.strip()]
+    if not API_KEYS:
+        missing.append("AGY_LAUNCH_API_KEY (or AGY_LAUNCH_API_KEYS)")
+
     if missing:
         example = os.path.join(_HERE, ".env.example")
         xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
@@ -179,12 +227,23 @@ def load_config() -> None:
 
     TARGET_BASE_URL = os.environ["AGY_LAUNCH_BASE_URL"].strip().rstrip("/")
     TARGET_MODEL = os.environ["AGY_LAUNCH_MODEL"].strip()
-    TARGET_API_KEY = os.environ["AGY_LAUNCH_API_KEY"].strip()
+    TARGET_API_KEY = API_KEYS[0]
     AGY_CLI_MODEL = (os.environ.get("AGY_LAUNCH_CLI_MODEL") or "gemini-3.5-flash-low").strip()
     AGY_BIN = (os.environ.get("AGY_BIN") or "agy").strip()
     MODEL_DISPLAY_NAME = (os.environ.get("AGY_LAUNCH_MODEL_DISPLAY_NAME") or TARGET_MODEL).strip()
     MODEL_PROVIDER = (os.environ.get("AGY_LAUNCH_MODEL_PROVIDER") or "").strip().lower()
     UPSTREAM_USER_AGENT = (os.environ.get("AGY_LAUNCH_USER_AGENT") or "curl/8.5.0").strip()
+    REASONING_EFFORT = (os.environ.get("AGY_LAUNCH_REASONING_EFFORT") or "").strip().lower()
+    try:
+        MAX_COMPLETION_TOKENS = int(os.environ.get("AGY_LAUNCH_MAX_COMPLETION_TOKENS") or "0")
+    except ValueError:
+        print("warning: AGY_LAUNCH_MAX_COMPLETION_TOKENS must be an integer", file=sys.stderr)
+        MAX_COMPLETION_TOKENS = 0
+    try:
+        MAX_TOKENS = int(os.environ.get("AGY_LAUNCH_MAX_TOKENS") or "0")
+    except ValueError:
+        print("warning: AGY_LAUNCH_MAX_TOKENS must be an integer", file=sys.stderr)
+        MAX_TOKENS = 0
     DEBUG_DIR = (
         os.environ.get("AGY_LAUNCH_DEBUG_DIR")
         or os.path.join(tempfile.gettempdir(), "agy-launch")
@@ -601,11 +660,17 @@ def build_openai_payload(raw: dict[str, Any]) -> dict[str, Any]:
     if isinstance(gen, dict):
         max_out = gen.get("maxOutputTokens")
         if isinstance(max_out, int) and max_out > 0:
-            # Cap to something reasonable for third-party gateways
             payload["max_tokens"] = min(max_out, 16384)
         temp = gen.get("temperature")
         if isinstance(temp, (int, float)):
             payload["temperature"] = temp
+
+    if "reasoning_effort" not in payload and REASONING_EFFORT:
+        payload["reasoning_effort"] = REASONING_EFFORT
+    if "max_completion_tokens" not in payload and MAX_COMPLETION_TOKENS > 0:
+        payload["max_completion_tokens"] = MAX_COMPLETION_TOKENS
+    if "max_tokens" not in payload and MAX_TOKENS > 0:
+        payload["max_tokens"] = MAX_TOKENS
 
     return payload
 
@@ -672,20 +737,50 @@ class TranslationProxy(BaseHTTPRequestHandler):
         _debug_write("outgoing_openai_request.json", openai_payload)
 
         api_url = f"{TARGET_BASE_URL}/chat/completions"
-        req = urllib.request.Request(
-            api_url,
-            data=json.dumps(openai_payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {TARGET_API_KEY}",
-                "Accept": "text/event-stream" if stream else "application/json",
-                "User-Agent": UPSTREAM_USER_AGENT,
-            },
-            method="POST",
-        )
+
+        response = None
+        last_error = None
+        for attempt in range(len(API_KEYS)):
+            active_key = get_active_key()
+            req = urllib.request.Request(
+                api_url,
+                data=json.dumps(openai_payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {active_key}",
+                    "Accept": "text/event-stream" if stream else "application/json",
+                    "User-Agent": UPSTREAM_USER_AGENT,
+                },
+                method="POST",
+            )
+            try:
+                response = urllib.request.urlopen(req, timeout=600)
+                break
+            except urllib.error.HTTPError as exc:
+                mark_key_failed(active_key, exc.code)
+                last_error = exc
+                if exc.code in (401, 402, 429, 502, 503, 504) and attempt < len(API_KEYS) - 1:
+                    continue
+                break
+            except Exception as e:
+                last_error = e
+                break
+
+        if not response:
+            err_msg = str(last_error)
+            status_code = 502
+            if isinstance(last_error, urllib.error.HTTPError):
+                status_code = last_error.code
+                try:
+                    err_msg = last_error.read().decode("utf-8", errors="replace")
+                except Exception:
+                    pass
+            print(f"[agy-launch] Forwarding request failed: {err_msg}", file=sys.stderr)
+            self._send_json({"error": f"Upstream error: {err_msg}"}, status=status_code)
+            return
 
         try:
-            with urllib.request.urlopen(req, timeout=600) as response:
+            with response:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
