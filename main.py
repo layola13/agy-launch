@@ -175,7 +175,7 @@ def mark_key_failed(key: str, status_code: int, retry_after: str | None = None) 
             FROZEN_KEYS[key] = now + 86400
             print(f"[agy-launch] key {key[:10]}... frozen permanently (401/402 auth error)", file=sys.stderr)
             return 86400.0
-        elif status_code in (502, 503, 504):
+        elif 500 <= status_code <= 599:
             freeze_for = UPSTREAM_5XX_FREEZE_SECONDS
             FROZEN_KEYS[key] = now + freeze_for
             print(f"[agy-launch] key {key[:10]}... frozen temporarily ({status_code} server error) for {freeze_for:.0f}s", file=sys.stderr)
@@ -865,14 +865,14 @@ class TranslationProxy(BaseHTTPRequestHandler):
                 retry_after = exc.headers.get("Retry-After") if exc.headers else None
                 frozen_for = mark_key_failed(active_key, exc.code, retry_after)
                 last_error = exc
-                retryable = exc.code in (429, 500, 502, 503, 504)
+                retryable = exc.code == 429 or 500 <= exc.code <= 599
                 if exc.code == 429:
                     cooldown = _clamp_retry_delay(
                         _parse_retry_after(retry_after),
                         min(frozen_for or UPSTREAM_429_FREEZE_SECONDS, _retry_backoff_seconds(attempt)),
                     )
                     _apply_upstream_cooldown(cooldown, "429 rate limit")
-                elif exc.code in (502, 503, 504):
+                elif 500 <= exc.code <= 599:
                     _apply_upstream_cooldown(_retry_backoff_seconds(attempt), f"{exc.code} upstream error")
                 if retryable and attempt < max_attempts - 1:
                     continue
