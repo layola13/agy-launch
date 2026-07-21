@@ -37,6 +37,8 @@ _REQUIRED_KEYS = (
     "AGY_LAUNCH_BASE_URL",
     "AGY_LAUNCH_MODEL",
 )
+_MANAGED_ENV_PREFIXES = ("AGY_LAUNCH_",)
+_MANAGED_ENV_KEYS = {"AGY_BIN"}
 
 # Filled by load_config() before the proxy serves traffic.
 TARGET_BASE_URL: str = ""
@@ -218,12 +220,15 @@ def _candidate_env_paths() -> list[str]:
     if explicit:
         paths.append(os.path.expanduser(explicit))
 
-    # 1) Current working directory (project-local)
+    # 1) Launcher/package directory config (the shipped agy-launch .env)
+    paths.append(os.path.join(_HERE, ".env"))
+
+    # 2) Current working directory (project-local)
     cwd = os.getcwd()
     paths.append(os.path.join(cwd, ".env"))
     paths.append(os.path.join(cwd, ".agy-launch.env"))
 
-    # 2) Walk parents (monorepo / nested cwd)
+    # 3) Walk parents (monorepo / nested cwd)
     parent = os.path.dirname(cwd)
     for _ in range(6):
         if not parent or parent == os.path.dirname(parent):
@@ -231,9 +236,6 @@ def _candidate_env_paths() -> list[str]:
         paths.append(os.path.join(parent, ".env"))
         paths.append(os.path.join(parent, ".agy-launch.env"))
         parent = os.path.dirname(parent)
-
-    # 3) Repo-local/package directory config
-    paths.append(os.path.join(_HERE, ".env"))
 
     # 4) User config (install script default)
     xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
@@ -251,18 +253,24 @@ def _candidate_env_paths() -> list[str]:
     return uniq
 
 
+def _is_managed_env_key(key: str) -> bool:
+    return key in _MANAGED_ENV_KEYS or key.startswith(_MANAGED_ENV_PREFIXES)
+
+
 def load_dotenv_files(*, override_existing: bool = False) -> list[str]:
     """Load KEY=VALUE from discovered .env files into os.environ.
 
-    By default does not override variables already present in the environment
-    (so `export AGY_LAUNCH_MODEL=... agy-launch` still wins).
+    By default, discovered .env files override inherited shell values for
+    agy-launch-managed keys (AGY_LAUNCH_* and AGY_BIN), preventing stale
+    exported credentials from winning over the launcher config. Unrelated
+    environment variables keep the traditional shell-over-dotenv behavior.
     When multiple files define the same key, the first file in priority order wins
-    (project cwd before repo/package config before user config).
+    (AGY_LAUNCH_ENV override before launcher .env before cwd/user config).
     """
     loaded: list[str] = []
     claimed: set[str] = set()
     if not override_existing:
-        claimed |= set(os.environ.keys())
+        claimed |= {k for k in os.environ.keys() if not _is_managed_env_key(k)}
 
     for path in _candidate_env_paths():
         if not os.path.isfile(path):

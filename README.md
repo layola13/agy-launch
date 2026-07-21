@@ -47,8 +47,8 @@ cp .env.example .env
 agy-launch
 ```
 
-When both project `.env` and `~/.config/agy-launch/.env` exist, **project wins** for keys defined there.  
-Shell `export` always wins over any `.env` file.
+The launcher/package `.env` next to `main.py` is loaded first for agy-launch settings, so it wins over cwd, parent, and user config files.
+For agy-launch-managed keys (`AGY_LAUNCH_*` and `AGY_BIN`), `.env` values also override stale shell exports from an existing session.
 
 ## Configuration
 
@@ -82,11 +82,11 @@ Shell `export` always wins over any `.env` file.
 
 ### Where `.env` is loaded (priority high → low)
 
-1. `AGY_LAUNCH_ENV` if set  
-2. `./.env` or `./.agy-launch.env` (cwd)  
-3. Parent directories (up to 6 levels)  
-4. Package directory `.env` (repo-local / launcher-local)  
-5. `~/.config/agy-launch/.env`  
+1. `AGY_LAUNCH_ENV` if set
+2. Package directory `.env` (repo-local / launcher-local, next to `main.py`)
+3. `./.env` or `./.agy-launch.env` (cwd)
+4. Parent directories (up to 6 levels)
+5. `~/.config/agy-launch/.env`
 6. `~/.agy-launch.env`
 
 Copy the template from [`.env.example`](.env.example).
@@ -160,7 +160,7 @@ agy-launch/
 
 ## Debug
 
-With `AGY_LAUNCH_VERBOSE=1`, stderr shows the proxy URL and which env files were loaded.  
+With `AGY_LAUNCH_VERBOSE=1`, stderr shows the proxy URL and which env files were loaded.
 Optional dumps under `AGY_LAUNCH_DEBUG_DIR`:
 
 - `incoming_request.json`
