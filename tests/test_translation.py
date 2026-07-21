@@ -16,6 +16,25 @@ class TranslationTests(unittest.TestCase):
         main.AGY_CLI_MODEL = "gemini-3.5-flash-low"
         main.MODEL_DISPLAY_NAME = "test-model"
         main.MODEL_PROVIDER = ""
+        main.UPSTREAM_MIN_INTERVAL_SECONDS = 0.25
+        main.UPSTREAM_RETRIES = 2
+        main.UPSTREAM_429_FREEZE_SECONDS = 60.0
+        main.UPSTREAM_5XX_FREEZE_SECONDS = 30.0
+        main.UPSTREAM_MAX_RETRY_AFTER_SECONDS = 300.0
+        main.UPSTREAM_BACKOFF_INITIAL_SECONDS = 1.0
+        main.UPSTREAM_BACKOFF_MAX_SECONDS = 30.0
+
+    def test_yolo_alias_maps_to_dangerously_skip_permissions(self) -> None:
+        args = main._normalize_cli_args(["--yolo", "--print", "hello"])
+        self.assertEqual(args, ["--dangerously-skip-permissions", "--print", "hello"])
+
+        args = main._normalize_cli_args(
+            ["--dangerously-skip-permissions", "--yolo", "--print", "hello"]
+        )
+        self.assertEqual(args, ["--dangerously-skip-permissions", "--print", "hello"])
+
+        args = main._normalize_cli_args(["--print", "--", "--yolo"])
+        self.assertEqual(args, ["--print", "--", "--yolo"])
 
     def test_model_role_function_response_becomes_tool_message(self) -> None:
         req = {
@@ -206,6 +225,28 @@ class TranslationTests(unittest.TestCase):
         # Clean up
         main.API_KEYS = []
         main.FROZEN_KEYS = {}
+
+    def test_retry_after_controls_429_freeze_duration(self) -> None:
+        main.API_KEYS = ["key1", "key2"]
+        main.FROZEN_KEYS = {}
+        main.UPSTREAM_MAX_RETRY_AFTER_SECONDS = 10.0
+
+        frozen_for = main.mark_key_failed("key1", 429, retry_after="20")
+
+        self.assertEqual(frozen_for, 10.0)
+        self.assertGreater(main.FROZEN_KEYS["key1"], main.time.time() + 9.0)
+        self.assertEqual(main.get_active_key(), "key2")
+
+        main.API_KEYS = []
+        main.FROZEN_KEYS = {}
+
+    def test_bounded_env_helpers_keep_defaults_on_invalid_values(self) -> None:
+        self.assertEqual(main._bounded_float("0.5", 0.25), 0.5)
+        self.assertEqual(main._bounded_float("bad", 0.25), 0.25)
+        self.assertEqual(main._bounded_float("-1", 0.25), 0.0)
+        self.assertEqual(main._bounded_int("4", 2), 4)
+        self.assertEqual(main._bounded_int("bad", 2), 2)
+        self.assertEqual(main._bounded_int("-3", 2), 0)
 
 
 if __name__ == "__main__":

@@ -68,6 +68,12 @@ Shell `export` always wins over any `.env` file.
 | `AGY_LAUNCH_MODEL_DISPLAY_NAME` | Optional display name shown for that agy model id; defaults to `AGY_LAUNCH_MODEL` |
 | `AGY_LAUNCH_MODEL_PROVIDER` | Optional provider metadata for the advertised model: `google`, `openai`, or `anthropic` |
 | `AGY_LAUNCH_USER_AGENT` | Optional upstream HTTP `User-Agent`; defaults to `curl/8.5.0` because some gateways block Python urllib’s default signature |
+| `AGY_LAUNCH_UPSTREAM_MIN_INTERVAL_SECONDS` | Minimum spacing between upstream requests across proxy threads (default `0.25`) |
+| `AGY_LAUNCH_UPSTREAM_RETRIES` | Extra retry attempts for retryable upstream failures after key rotation (default `2`) |
+| `AGY_LAUNCH_429_FREEZE_SECONDS` | Default per-key freeze after 429 when `Retry-After` is absent (default `60`) |
+| `AGY_LAUNCH_MAX_RETRY_AFTER_SECONDS` | Cap for `Retry-After` / global cooldown waits (default `300`) |
+| `AGY_LAUNCH_BACKOFF_INITIAL_SECONDS` | Initial retry backoff for transient upstream failures (default `1`) |
+| `AGY_LAUNCH_BACKOFF_MAX_SECONDS` | Maximum retry backoff for transient upstream failures (default `30`) |
 | `AGY_BIN` | Path to `agy` (default `agy`) |
 | `AGY_LAUNCH_ENV` | Force a specific env file path |
 | `AGY_LAUNCH_VERBOSE=1` | Log proxy requests |
@@ -126,9 +132,12 @@ which resolves symlinks before locating `main.py`.
 agy-launch
 agy-launch --continue
 agy-launch --print "hi" --print-timeout 2m
+agy-launch --yolo
 agy-launch --model gemini-3.5-flash-low
 AGY_LAUNCH_VERBOSE=1 agy-launch
 ```
+
+`--yolo` is a shortcut for `--dangerously-skip-permissions` and is forwarded to `agy` as that flag.
 
 Direct run without install:
 

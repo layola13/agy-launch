@@ -15,13 +15,16 @@ See .env.example and README.md.
 from __future__ import annotations
 
 from copy import deepcopy
+from email.utils import parsedate_to_datetime
 import json
 import os
+import random
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -51,9 +54,89 @@ DEBUG_DIR: str = ""
 MODEL_DISPLAY_NAME: str = ""
 MODEL_PROVIDER: str = ""
 UPSTREAM_USER_AGENT: str = "curl/8.5.0"
+UPSTREAM_MIN_INTERVAL_SECONDS: float = 0.25
+UPSTREAM_RETRIES: int = 2
+UPSTREAM_429_FREEZE_SECONDS: float = 60.0
+UPSTREAM_5XX_FREEZE_SECONDS: float = 30.0
+UPSTREAM_MAX_RETRY_AFTER_SECONDS: float = 300.0
+UPSTREAM_BACKOFF_INITIAL_SECONDS: float = 1.0
+UPSTREAM_BACKOFF_MAX_SECONDS: float = 30.0
+UPSTREAM_NEXT_REQUEST_AT: float = 0.0
+UPSTREAM_COOLDOWN_UNTIL: float = 0.0
+UPSTREAM_THROTTLE_LOCK = threading.Lock()
 _LOADED_ENV_FILES: list[str] = []
 
-import time
+
+def _bounded_float(value: str | None, default: float, *, minimum: float = 0.0) -> float:
+    try:
+        parsed = float(value) if value is not None and value.strip() else default
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, parsed)
+
+
+def _bounded_int(value: str | None, default: int, *, minimum: int = 0) -> int:
+    try:
+        parsed = int(value) if value is not None and value.strip() else default
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, parsed)
+
+
+def _parse_retry_after(value: str | None, *, now: float | None = None) -> float | None:
+    if not value:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        dt = parsedate_to_datetime(raw)
+        if dt is None:
+            return None
+        return max(0.0, dt.timestamp() - (time.time() if now is None else now))
+    except Exception:
+        return None
+
+
+def _clamp_retry_delay(delay: float | None, fallback: float) -> float:
+    selected = fallback if delay is None else delay
+    return min(max(0.0, selected), UPSTREAM_MAX_RETRY_AFTER_SECONDS)
+
+
+def _retry_backoff_seconds(attempt: int) -> float:
+    base = min(UPSTREAM_BACKOFF_MAX_SECONDS, UPSTREAM_BACKOFF_INITIAL_SECONDS * (2 ** max(0, attempt)))
+    return base + random.uniform(0.0, min(1.0, base * 0.25))
+
+
+def _apply_upstream_cooldown(seconds: float, reason: str) -> None:
+    if seconds <= 0:
+        return
+    capped = min(seconds, UPSTREAM_MAX_RETRY_AFTER_SECONDS)
+    with UPSTREAM_THROTTLE_LOCK:
+        global UPSTREAM_COOLDOWN_UNTIL
+        until = time.time() + capped
+        if until > UPSTREAM_COOLDOWN_UNTIL:
+            UPSTREAM_COOLDOWN_UNTIL = until
+    if os.environ.get("AGY_LAUNCH_VERBOSE"):
+        print(f"[agy-launch] upstream cooldown {capped:.2f}s ({reason})", file=sys.stderr)
+
+
+def _wait_for_upstream_slot() -> None:
+    global UPSTREAM_NEXT_REQUEST_AT
+    while True:
+        with UPSTREAM_THROTTLE_LOCK:
+            now = time.time()
+            wait_until = max(UPSTREAM_COOLDOWN_UNTIL, UPSTREAM_NEXT_REQUEST_AT)
+            wait_for = wait_until - now
+            if wait_for <= 0:
+                UPSTREAM_NEXT_REQUEST_AT = now + UPSTREAM_MIN_INTERVAL_SECONDS
+                return
+        time.sleep(min(wait_for, 5.0))
+
 
 def get_active_key() -> str:
     with FROZEN_LOCK:
@@ -61,34 +144,43 @@ def get_active_key() -> str:
         for key in API_KEYS:
             if FROZEN_KEYS.get(key, 0) <= now:
                 return key
-        
+
         candidates = []
         for key in API_KEYS:
             expire = FROZEN_KEYS.get(key, 0)
-            if expire - now < 43200: # less than 12 hours
+            if expire - now < 43200:  # less than 12 hours
                 candidates.append((expire, key))
-                
+
         if candidates:
             candidates.sort()
             expire, key = candidates[0]
             FROZEN_KEYS[key] = 0
             return key
-            
+
         return API_KEYS[0]
 
 
-def mark_key_failed(key: str, status_code: int) -> None:
+def mark_key_failed(key: str, status_code: int, retry_after: str | None = None) -> float:
     with FROZEN_LOCK:
         now = time.time()
         if status_code == 429:
-            FROZEN_KEYS[key] = now + 60
-            print(f"[agy-launch] key {key[:10]}... frozen temporarily (429 rate limit) for 60s", file=sys.stderr)
+            freeze_for = _clamp_retry_delay(
+                _parse_retry_after(retry_after, now=now),
+                UPSTREAM_429_FREEZE_SECONDS,
+            )
+            FROZEN_KEYS[key] = now + freeze_for
+            print(f"[agy-launch] key {key[:10]}... frozen temporarily (429 rate limit) for {freeze_for:.0f}s", file=sys.stderr)
+            return freeze_for
         elif status_code in (401, 402):
             FROZEN_KEYS[key] = now + 86400
             print(f"[agy-launch] key {key[:10]}... frozen permanently (401/402 auth error)", file=sys.stderr)
+            return 86400.0
         elif status_code in (502, 503, 504):
-            FROZEN_KEYS[key] = now + 30
-            print(f"[agy-launch] key {key[:10]}... frozen temporarily ({status_code} server error) for 30s", file=sys.stderr)
+            freeze_for = UPSTREAM_5XX_FREEZE_SECONDS
+            FROZEN_KEYS[key] = now + freeze_for
+            print(f"[agy-launch] key {key[:10]}... frozen temporarily ({status_code} server error) for {freeze_for:.0f}s", file=sys.stderr)
+            return freeze_for
+    return 0.0
 
 
 def _parse_dotenv(path: str) -> dict[str, str]:
@@ -196,6 +288,10 @@ def load_config() -> None:
     global AGY_CLI_MODEL, AGY_BIN, DEBUG_DIR, MODEL_DISPLAY_NAME, MODEL_PROVIDER
     global UPSTREAM_USER_AGENT, _LOADED_ENV_FILES
     global REASONING_EFFORT, MAX_COMPLETION_TOKENS, MAX_TOKENS
+    global UPSTREAM_MIN_INTERVAL_SECONDS, UPSTREAM_RETRIES
+    global UPSTREAM_429_FREEZE_SECONDS, UPSTREAM_5XX_FREEZE_SECONDS
+    global UPSTREAM_MAX_RETRY_AFTER_SECONDS, UPSTREAM_BACKOFF_INITIAL_SECONDS
+    global UPSTREAM_BACKOFF_MAX_SECONDS
 
     _LOADED_ENV_FILES = load_dotenv_files()
 
@@ -233,6 +329,13 @@ def load_config() -> None:
     MODEL_DISPLAY_NAME = (os.environ.get("AGY_LAUNCH_MODEL_DISPLAY_NAME") or TARGET_MODEL).strip()
     MODEL_PROVIDER = (os.environ.get("AGY_LAUNCH_MODEL_PROVIDER") or "").strip().lower()
     UPSTREAM_USER_AGENT = (os.environ.get("AGY_LAUNCH_USER_AGENT") or "curl/8.5.0").strip()
+    UPSTREAM_MIN_INTERVAL_SECONDS = _bounded_float(os.environ.get("AGY_LAUNCH_UPSTREAM_MIN_INTERVAL_SECONDS"), 0.25)
+    UPSTREAM_RETRIES = _bounded_int(os.environ.get("AGY_LAUNCH_UPSTREAM_RETRIES"), 2)
+    UPSTREAM_429_FREEZE_SECONDS = _bounded_float(os.environ.get("AGY_LAUNCH_429_FREEZE_SECONDS"), 60.0)
+    UPSTREAM_5XX_FREEZE_SECONDS = _bounded_float(os.environ.get("AGY_LAUNCH_5XX_FREEZE_SECONDS"), 30.0)
+    UPSTREAM_MAX_RETRY_AFTER_SECONDS = _bounded_float(os.environ.get("AGY_LAUNCH_MAX_RETRY_AFTER_SECONDS"), 300.0)
+    UPSTREAM_BACKOFF_INITIAL_SECONDS = _bounded_float(os.environ.get("AGY_LAUNCH_BACKOFF_INITIAL_SECONDS"), 1.0)
+    UPSTREAM_BACKOFF_MAX_SECONDS = _bounded_float(os.environ.get("AGY_LAUNCH_BACKOFF_MAX_SECONDS"), 30.0)
     REASONING_EFFORT = (os.environ.get("AGY_LAUNCH_REASONING_EFFORT") or "").strip().lower()
     try:
         MAX_COMPLETION_TOKENS = int(os.environ.get("AGY_LAUNCH_MAX_COMPLETION_TOKENS") or "0")
@@ -740,7 +843,8 @@ class TranslationProxy(BaseHTTPRequestHandler):
 
         response = None
         last_error = None
-        for attempt in range(len(API_KEYS)):
+        max_attempts = max(len(API_KEYS), 1) + max(0, UPSTREAM_RETRIES)
+        for attempt in range(max_attempts):
             active_key = get_active_key()
             req = urllib.request.Request(
                 api_url,
@@ -754,16 +858,32 @@ class TranslationProxy(BaseHTTPRequestHandler):
                 method="POST",
             )
             try:
+                _wait_for_upstream_slot()
                 response = urllib.request.urlopen(req, timeout=600)
                 break
             except urllib.error.HTTPError as exc:
-                mark_key_failed(active_key, exc.code)
+                retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                frozen_for = mark_key_failed(active_key, exc.code, retry_after)
                 last_error = exc
-                if exc.code in (401, 402, 429, 502, 503, 504) and attempt < len(API_KEYS) - 1:
+                retryable = exc.code in (429, 500, 502, 503, 504)
+                if exc.code == 429:
+                    cooldown = _clamp_retry_delay(
+                        _parse_retry_after(retry_after),
+                        min(frozen_for or UPSTREAM_429_FREEZE_SECONDS, _retry_backoff_seconds(attempt)),
+                    )
+                    _apply_upstream_cooldown(cooldown, "429 rate limit")
+                elif exc.code in (502, 503, 504):
+                    _apply_upstream_cooldown(_retry_backoff_seconds(attempt), f"{exc.code} upstream error")
+                if retryable and attempt < max_attempts - 1:
+                    continue
+                if exc.code in (401, 402) and attempt < min(len(API_KEYS), max_attempts) - 1:
                     continue
                 break
             except Exception as e:
                 last_error = e
+                if attempt < max_attempts - 1:
+                    _apply_upstream_cooldown(_retry_backoff_seconds(attempt), "transport error")
+                    continue
                 break
 
         if not response:
@@ -975,6 +1095,33 @@ def find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _normalize_cli_args(args: list[str]) -> list[str]:
+    """Translate agy-launch convenience flags to agy flags."""
+    normalized: list[str] = []
+    saw_dangerous = False
+    passthrough = False
+    for arg in args:
+        if passthrough:
+            normalized.append(arg)
+            continue
+        if arg == "--":
+            normalized.append(arg)
+            passthrough = True
+            continue
+        if arg == "--yolo":
+            if not saw_dangerous:
+                normalized.append("--dangerously-skip-permissions")
+                saw_dangerous = True
+            continue
+        if arg == "--dangerously-skip-permissions":
+            if not saw_dangerous:
+                normalized.append(arg)
+                saw_dangerous = True
+            continue
+        normalized.append(arg)
+    return normalized
+
+
 def main() -> None:
     global LOAD_RESP, MODELS_RESP
 
@@ -991,7 +1138,7 @@ def main() -> None:
     # Prevent accidental double-proxy if someone nests launches
     env.pop("AGY_LAUNCH_NESTED", None)
 
-    args = sys.argv[1:]
+    args = _normalize_cli_args(sys.argv[1:])
     # Default to a known agy model id; upstream still uses TARGET_MODEL.
     if "--model" not in args:
         args = ["--model", AGY_CLI_MODEL, *args]
