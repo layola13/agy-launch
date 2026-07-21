@@ -18,6 +18,7 @@ from copy import deepcopy
 from email.utils import parsedate_to_datetime
 import json
 import os
+import platform
 import random
 import socket
 import subprocess
@@ -27,6 +28,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -67,6 +69,9 @@ UPSTREAM_NEXT_REQUEST_AT: float = 0.0
 UPSTREAM_COOLDOWN_UNTIL: float = 0.0
 UPSTREAM_THROTTLE_LOCK = threading.Lock()
 _LOADED_ENV_FILES: list[str] = []
+_CODEX_SESSION_ID = f"session-{uuid.uuid4()}"
+_CODEX_THREAD_ID = str(uuid.uuid4())
+_CODEX_INSTALLATION_ID = str(uuid.uuid4())
 
 
 def _bounded_float(value: str | None, default: float, *, minimum: float = 0.0) -> float:
@@ -83,6 +88,76 @@ def _bounded_int(value: str | None, default: int, *, minimum: int = 0) -> int:
     except (TypeError, ValueError):
         return default
     return max(minimum, parsed)
+
+
+def _env_truthy(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _codex_version() -> str:
+    configured = (os.environ.get("CODEX_VERSION") or "").strip()
+    if configured:
+        return configured
+    codex_bin = (os.environ.get("CODEX_BIN") or "codex").strip() or "codex"
+    try:
+        result = subprocess.run(
+            [codex_bin, "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
+        return "0.144.6"
+    for token in result.stdout.replace("v", " v").split():
+        candidate = token.lstrip("v")
+        parts = candidate.split(".")
+        if len(parts) >= 2 and all(part.isdigit() for part in parts[:2]):
+            return candidate
+    return "0.144.6"
+
+
+def _codex_user_agent() -> str:
+    originator = (os.environ.get("CODEX_ORIGINATOR") or "codex_cli_rs").strip() or "codex_cli_rs"
+    version = _codex_version()
+    system = platform.system() or "Unknown"
+    release = platform.release() or "unknown"
+    arch = platform.machine() or "unknown"
+    return f"{originator}/{version} ({system} {release}; {arch})"
+
+
+def _default_upstream_user_agent(fallback: str) -> str:
+    if _env_truthy("CODEX_HEAD"):
+        return (os.environ.get("CODEX_USER_AGENT") or _codex_user_agent()).strip()
+    return fallback
+
+
+def _with_codex_headers(headers: dict[str, str]) -> dict[str, str]:
+    if not _env_truthy("CODEX_HEAD"):
+        return headers
+
+    out = dict(headers)
+    out["User-Agent"] = out.get("User-Agent") or _codex_user_agent()
+    out.setdefault("Originator", (os.environ.get("CODEX_ORIGINATOR") or "codex_cli_rs").strip() or "codex_cli_rs")
+    out.setdefault("session-id", (os.environ.get("CODEX_SESSION_ID") or _CODEX_SESSION_ID).strip())
+    out.setdefault("thread-id", (os.environ.get("CODEX_THREAD_ID") or _CODEX_THREAD_ID).strip())
+    out.setdefault("x-codex-installation-id", (os.environ.get("CODEX_INSTALLATION_ID") or _CODEX_INSTALLATION_ID).strip())
+    beta = (os.environ.get("CODEX_OPENAI_BETA") or "").strip()
+    if beta:
+        out.setdefault("OpenAI-Beta", beta)
+    return out
+
+
+def build_upstream_headers(api_key: str, *, stream: bool) -> dict[str, str]:
+    return _with_codex_headers(
+        {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "text/event-stream" if stream else "application/json",
+            "User-Agent": UPSTREAM_USER_AGENT,
+        }
+    )
 
 
 def _parse_retry_after(value: str | None, *, now: float | None = None) -> float | None:
@@ -336,7 +411,7 @@ def load_config() -> None:
     AGY_BIN = (os.environ.get("AGY_BIN") or "agy").strip()
     MODEL_DISPLAY_NAME = (os.environ.get("AGY_LAUNCH_MODEL_DISPLAY_NAME") or TARGET_MODEL).strip()
     MODEL_PROVIDER = (os.environ.get("AGY_LAUNCH_MODEL_PROVIDER") or "").strip().lower()
-    UPSTREAM_USER_AGENT = (os.environ.get("AGY_LAUNCH_USER_AGENT") or "curl/8.5.0").strip()
+    UPSTREAM_USER_AGENT = (os.environ.get("AGY_LAUNCH_USER_AGENT") or _default_upstream_user_agent("curl/8.5.0")).strip()
     UPSTREAM_MIN_INTERVAL_SECONDS = _bounded_float(os.environ.get("AGY_LAUNCH_UPSTREAM_MIN_INTERVAL_SECONDS"), 0.25)
     UPSTREAM_RETRIES = _bounded_int(os.environ.get("AGY_LAUNCH_UPSTREAM_RETRIES"), 2)
     UPSTREAM_429_FREEZE_SECONDS = _bounded_float(os.environ.get("AGY_LAUNCH_429_FREEZE_SECONDS"), 60.0)
@@ -857,12 +932,7 @@ class TranslationProxy(BaseHTTPRequestHandler):
             req = urllib.request.Request(
                 api_url,
                 data=json.dumps(openai_payload).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {active_key}",
-                    "Accept": "text/event-stream" if stream else "application/json",
-                    "User-Agent": UPSTREAM_USER_AGENT,
-                },
+                headers=build_upstream_headers(active_key, stream=stream),
                 method="POST",
             )
             try:
