@@ -32,7 +32,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
+_HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 
 # Required config keys (must come from env / .env — never hard-coded).
 _REQUIRED_KEYS = (
@@ -1216,10 +1216,25 @@ def main() -> None:
     # Prevent accidental double-proxy if someone nests launches
     env.pop("AGY_LAUNCH_NESTED", None)
 
-    args = _normalize_cli_args(sys.argv[1:])
-    # Default to a known agy model id; upstream still uses TARGET_MODEL.
-    if "--model" not in args:
-        args = ["--model", AGY_CLI_MODEL, *args]
+    raw_args = _normalize_cli_args(sys.argv[1:])
+    has_model = False
+    new_args = []
+    i = 0
+    while i < len(raw_args):
+        if raw_args[i] == "--model" and i + 1 < len(raw_args):
+            new_args.extend(["--model", AGY_CLI_MODEL])
+            has_model = True
+            i += 2
+        elif raw_args[i].startswith("--model="):
+            new_args.append(f"--model={AGY_CLI_MODEL}")
+            has_model = True
+            i += 1
+        else:
+            new_args.append(raw_args[i])
+            i += 1
+    if not has_model:
+        new_args = ["--model", AGY_CLI_MODEL, *new_args]
+    args = new_args
 
     if os.environ.get("AGY_LAUNCH_VERBOSE"):
         env_note = ", ".join(_LOADED_ENV_FILES) if _LOADED_ENV_FILES else "(none)"
